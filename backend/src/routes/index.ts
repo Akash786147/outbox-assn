@@ -17,6 +17,7 @@ router.get("/emails", requireAuth, email.list);
 router.get("/emails/stats", requireAuth, email.stats);
 router.get("/emails/:id", requireAuth, email.getOne);
 router.patch("/emails/:id/star", requireAuth, email.star);
+router.get("/attachments/:id", requireAuth, email.attachment);
 
 router.get("/slack/connect-url", requireAuth, slack.connectUrl);
 router.get("/slack/callback", slack.callback);

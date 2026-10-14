@@ -39,6 +39,23 @@ export interface Email {
   senderEmail: string;
 }
 
+export interface AttachmentMeta {
+  id: number;
+  filename: string;
+  contentType: string;
+  size: number;
+}
+
+export interface EmailDetail extends Email {
+  attachments: AttachmentMeta[];
+}
+
+export interface AttachmentUpload {
+  filename: string;
+  contentType: string;
+  content: string;
+}
+
 export interface EmailPage {
   items: Email[];
   nextPage: number | null;
@@ -57,6 +74,7 @@ export interface ScheduleEmailPayload {
   startTime?: string;
   delaySeconds: number;
   hourlyLimit: number;
+  attachments?: AttachmentUpload[];
 }
 
 export interface ScheduleEmailResponse {

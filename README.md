@@ -1,12 +1,12 @@
 # Email Job Scheduler (ReachInbox assignment)
 
-A full-stack email scheduler. You compose an email, upload a list of leads, and choose a start time, a delay between emails and an hourly limit. The backend stores everything in Postgres, schedules each email as a **BullMQ delayed job** (no cron), sends through **Ethereal SMTP** from several sender accounts, enforces **Redis-backed hourly rate limits**, sends a **Slack** message when a limit is hit, and indexes every email in **Elasticsearch** for search.
+A full-stack email scheduler. You compose an email, upload a list of leads, and choose a start time, a delay between emails and an hourly limit. The backend stores everything in Postgres, schedules each email as a **BullMQ delayed job** (no cron), sends through **Ethereal SMTP** from several sender accounts, enforces **Redis-backed hourly rate limits**, sends a **Slack** message when a limit is hit, and makes every email searchable through an **indexed Postgres full-text search** (with optional Elasticsearch).
 
 ```
 email-scheduler/
-├── backend/    Express + TypeScript + Drizzle (Postgres) + BullMQ + Elasticsearch
+├── backend/    Express + TypeScript + Drizzle (Postgres) + BullMQ
 ├── frontend/   React (Vite) + TypeScript + Tailwind + Zustand + TanStack Query
-└── docker-compose.yml   Postgres, Redis, Elasticsearch for local dev
+└── docker-compose.yml   Postgres, Redis (and optional Elasticsearch) for local dev
 ```
 
 ---
@@ -19,7 +19,7 @@ email-scheduler/
 | DB | PostgreSQL + Drizzle ORM (migrations in `backend/drizzle`) |
 | Queue | BullMQ on Redis (delayed jobs, limiter, concurrency) |
 | Mail | Nodemailer + Ethereal (accounts created automatically) |
-| Search | Elasticsearch 8 (falls back to Postgres `ILIKE` if not configured) |
+| Search | Postgres full-text search (`tsvector` + GIN index, `pg_trgm` for recipients), optional Elasticsearch 8 |
 | Queue UI | bull-board at `/admin/queues` |
 | Auth | Google OAuth (auth-code flow) + email/password, JWT sessions |
 | Notifications | Slack OAuth v2 (`incoming-webhook` scope) |
@@ -31,15 +31,15 @@ email-scheduler/
 
 ### 1. Infra
 
-You need Postgres, Redis and (optionally) Elasticsearch.
+You need Postgres and Redis. Elasticsearch is optional.
 
 ```bash
-docker compose up -d            # all three
+docker compose up -d postgres redis
 # or only some of them, e.g. if Postgres is already installed:
-docker compose up -d redis elasticsearch
+docker compose up -d redis
 ```
 
-No Docker? On Windows use [Memurai](https://www.memurai.com/) or Redis inside WSL, then run Redis with `appendonly yes` so delayed jobs survive a Redis restart. Elasticsearch is optional: leave `ELASTICSEARCH_URL` empty and search falls back to the database.
+No Docker? On Windows use [Memurai](https://www.memurai.com/) or Redis inside WSL, then run Redis with `appendonly yes` so delayed jobs survive a Redis restart. Leave `ELASTICSEARCH_URL` empty to use the built-in Postgres search.
 
 ### 2. Backend
 
@@ -77,7 +77,7 @@ npm run dev              # http://localhost:5173
 | `JWT_SECRET` | Secret for session tokens |
 | `DATABASE_URL` | Postgres connection string |
 | `REDIS_URL` | Redis connection string |
-| `ELASTICSEARCH_URL` / `ELASTICSEARCH_API_KEY` | Leave the URL empty to disable ES |
+| `ELASTICSEARCH_URL` / `ELASTICSEARCH_API_KEY` | Optional. Leave empty to use Postgres full-text search |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth client |
 | `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET` | Slack app credentials |
 | `ETHEREAL_SENDER_COUNT` | Number of Ethereal sender accounts to create (default 3) |
@@ -121,7 +121,7 @@ In the dashboard, open the user card dropdown and choose **Connect Slack**. That
 
 ```
  React (Vite) ──HTTP──▶ Express API ──insert──▶ Postgres (source of truth)
-                           │  └──bulk index──▶ Elasticsearch
+                           │     (search_vector + GIN index)
                            └──addBulk(delayed jobs)──▶ Redis / BullMQ
                                                          │
                      BullMQ Worker(s) ◀──────────────────┘
@@ -135,7 +135,7 @@ In the dashboard, open the user card dropdown and choose **Connect Slack**. That
 
 1. `POST /api/emails/schedule` validates the payload, removes duplicate recipients and creates one row per recipient in a single **batch**: `scheduledAt = startTime + index × delaySeconds`.
 2. Rows are inserted **first**, because the DB is the source of truth. Then each row becomes a BullMQ job with `delay = scheduledAt − now` and **`jobId = email-<id>`**.
-3. The worker picks up the job when it is due, checks the rate limits, sends through the chosen sender's SMTP transporter, and updates the row (`sent` with `sentAt`, `messageId` and `previewUrl`, or `failed` with the error). Each change is re-indexed in Elasticsearch.
+3. The worker picks up the job when it is due, checks the rate limits, sends through the chosen sender's SMTP transporter, and updates the row (`sent` with `sentAt`, `messageId` and `previewUrl`, or `failed` with the error). Postgres keeps the search index up to date by itself (and Elasticsearch too, if it is configured).
 
 There is no cron anywhere: timing is handled entirely by BullMQ's delayed sorted set in Redis.
 
@@ -183,9 +183,16 @@ When a limit is reached, the job is **not dropped or failed**:
 
 Try it: `npm run load-test -- you@example.com 1000 50` schedules 1000 emails with an hourly limit of 50 for an existing user.
 
-### Search
+### Search (indexing)
 
-Every email is bulk-indexed in Elasticsearch (`emails` index) when it's created and again whenever its status changes. The dashboard search box calls `GET /api/emails?q=`, which runs a fuzzy `multi_match` over subject, recipient and body, filtered by user and tab. ES returns ids, and the rows come from Postgres so the list is always current. If ES isn't configured, the same endpoint uses `ILIKE`.
+Emails are searchable through **Postgres full-text search**, so no extra service is needed:
+
+- `emails.search_vector` is a **generated `tsvector` column**: `subject` (weight A) + `to_email` (B) + `body` with HTML tags stripped (C). Postgres recomputes it on every insert and update, so the index can never go stale.
+- A **GIN index** (`emails_search_idx`) on that column makes the full-text match an index lookup instead of a table scan.
+- A **trigram GIN index** (`pg_trgm`, `emails_to_email_trgm_idx`) on `to_email` makes partial address matches fast, so `john` finds `john@acme.com`.
+- The search box calls `GET /api/emails?q=`. Each word becomes a prefix term (`foll` → `foll:*`), so results update while you type, filtered by user and tab.
+
+**Elasticsearch is optional.** If `ELASTICSEARCH_URL` is set, emails are also bulk-indexed into an `emails` index and the same endpoint uses a fuzzy `multi_match` query there instead. Postgres stays the source of truth either way.
 
 ### Queue dashboard
 
@@ -201,11 +208,12 @@ bull-board runs at **`http://localhost:4000/admin/queues`** (basic auth from `AD
 | POST | `/api/auth/login` | `{ email, password }` → log in, or sign up if the email is new |
 | GET | `/api/auth/me` | Current user, including Slack status |
 | GET | `/api/senders` | Ethereal sender accounts |
-| POST | `/api/emails/schedule` | `{ senderId, subject, body, recipients[], startTime?, delaySeconds, hourlyLimit }` |
+| POST | `/api/emails/schedule` | `{ senderId, subject, body, recipients[], startTime?, delaySeconds, hourlyLimit, attachments? }` (attachments as base64) |
 | GET | `/api/emails` | `?tab=scheduled\|sent&status=&q=&page=&limit=` |
 | GET | `/api/emails/stats` | Counts for the sidebar |
 | GET | `/api/emails/:id` | Email detail |
 | PATCH | `/api/emails/:id/star` | Toggle star |
+| GET | `/api/attachments/:id` | Download an attachment (only for its owner) |
 | GET | `/api/slack/connect-url` | Slack authorize URL (signed `state`) |
 | GET | `/api/slack/callback` | Slack OAuth redirect |
 | POST | `/api/slack/test` | Send a test Slack message |
@@ -221,13 +229,14 @@ bull-board runs at **`http://localhost:4000/admin/queues`** (basic auth from `AD
 - [x] Postgres + Drizzle schema and migrations (applied automatically on boot)
 - [x] BullMQ delayed jobs, no cron
 - [x] Multiple Ethereal senders, picked per email in the "From" dropdown
+- [x] File attachments stored in Postgres and attached to every email in the batch
 - [x] Survives restarts: Redis persistence, recovery from the DB on boot, graceful shutdown
 - [x] Idempotency: deterministic jobId, status check before sending, fixed Message-ID
 - [x] Configurable worker concurrency
 - [x] Minimum delay between sends (BullMQ limiter, shared through Redis)
 - [x] Hourly limits per sender and per batch using atomic Redis counters; over-limit emails are pushed to the next window, never dropped
 - [x] Slack OAuth plus a live notification when a limit is hit, with connect/disconnect/test
-- [x] Elasticsearch indexing and search
+- [x] Indexed search: Postgres full-text search (generated `tsvector` + GIN, `pg_trgm`), optional Elasticsearch
 - [x] bull-board queue dashboard
 - [x] Retries with exponential backoff, and a `failed` status once retries run out
 
@@ -236,9 +245,9 @@ bull-board runs at **`http://localhost:4000/admin/queues`** (basic auth from `AD
 - [x] Real Google OAuth login, plus email/password (as in the Figma)
 - [x] Sidebar user card (avatar, name, email) with a dropdown for Slack and Logout
 - [x] Scheduled and Sent tabs with live counts; the scheduled tab refreshes every 10 s
-- [x] Search (debounced, runs on Elasticsearch), status filter, refresh
-- [x] Compose page: sender, recipients as chips with a CSV/TXT upload that shows how many emails were detected, subject, rich-text body (TipTap), delay, hourly limit, Send Later popover with presets
-- [x] Email detail page with an Ethereal preview link
+- [x] Search (debounced, uses the indexed backend search), status filter, refresh
+- [x] Compose page: sender, recipients as chips with a CSV/TXT upload that shows how many emails were detected, subject, rich-text body (TipTap), file attachments (paperclip, with previews), delay, hourly limit, Send Later popover with presets
+- [x] Email detail page with attachment previews and an Ethereal preview link
 - [x] Loading, empty and error states, toasts
 - [x] Zustand for client state (auth session, inbox filters), TanStack Query for server state, custom hooks, reusable UI components
 
@@ -254,7 +263,7 @@ bull-board runs at **`http://localhost:4000/admin/queues`** (basic auth from `AD
 | API + worker | **Render / Railway / Fly.io**: root `backend`, build `npm install && npm run build`, start `npm start`. Either set `RUN_WORKER=true` (one service) or add a second service running `npm run start:worker`. |
 | Postgres | Neon / Supabase / Render Postgres |
 | Redis | Upstash / Redis Cloud / Railway Redis |
-| Elasticsearch | Elastic Cloud (or leave empty to use the DB fallback) |
+| Elasticsearch | Not needed. Optional: Elastic Cloud |
 
 After deploying, update `FRONTEND_URL` and `BACKEND_URL`, the Google JS origins and the Slack redirect URL.
 
@@ -262,9 +271,10 @@ After deploying, update `FRONTEND_URL` and `BACKEND_URL`, the Google JS origins 
 
 ## Assumptions and trade-offs
 
+- **Search runs on Postgres** (indexed full-text search) instead of requiring a hosted Elasticsearch cluster. This keeps deployment to Neon + Render + Vercel. Elasticsearch support is built in and switches on just by setting `ELASTICSEARCH_URL`.
 - **Fixed hourly windows** (clock hours) rather than a sliding window. They're simpler and easy to see in Redis; the cost is that a burst can happen around the hour boundary.
 - **Sender accounts are shared** between users, so the per-sender limit is global. The per-batch limit from the compose screen is separate and applies per campaign.
-- **No attachments.** The paperclip in the Figma opens the leads-file upload, and its badge shows how many files were uploaded.
+- **Attachments are stored in Postgres** (`bytea`, max 5 files / 5 MB per campaign) instead of object storage like S3. That keeps the setup to Neon + Render, and the files survive restarts and redeploys (Render's disk is wiped on deploy). They are stored once per batch, not once per email. At larger scale they would move to S3 and keep only a reference in the DB.
 - Email/password login signs you up automatically on first use, to match the "or sign up through email" design.
 - Rate-limited bounces take limiter slots (see "Behaviour under load").
 - The Slack webhook URL is stored in plain text. In production it should be encrypted at rest.

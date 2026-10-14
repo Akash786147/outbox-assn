@@ -6,6 +6,7 @@ import { IconButton } from "@/components/ui/IconButton";
 import { PageLoader } from "@/components/ui/Spinner";
 import { StarButton } from "@/components/emails/StarButton";
 import { StatusChip } from "@/components/emails/StatusChip";
+import { RemoteAttachment } from "@/components/attachments/RemoteAttachment";
 import { useEmail } from "@/hooks/useEmails";
 import { useAuthStore } from "@/store/authStore";
 import { formatDateTime } from "@/utils/format";
@@ -47,6 +48,14 @@ export default function EmailDetailPage() {
               </div>
 
               <div className="rich-content mt-6" dangerouslySetInnerHTML={{ __html: email.body }} />
+
+              {email.attachments.length > 0 && (
+                <div className="mt-6 flex flex-wrap gap-4">
+                  {email.attachments.map((attachment) => (
+                    <RemoteAttachment key={attachment.id} attachment={attachment} />
+                  ))}
+                </div>
+              )}
 
               {email.error && email.status === "failed" && (
                 <p className="mt-6 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">Error: {email.error}</p>

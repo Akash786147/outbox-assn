@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import { getEmail, getStats, listEmails, scheduleEmails, toggleStar } from "../services/emailService";
 import { listSenders } from "../services/senderService";
+import { getAttachmentForUser, MAX_ATTACHMENTS } from "../services/attachmentService";
 
 const scheduleSchema = z.object({
   senderId: z.number().int().positive("Pick a sender"),
@@ -11,6 +12,10 @@ const scheduleSchema = z.object({
   startTime: z.iso.datetime().optional(),
   delaySeconds: z.number().int().min(0).max(3600),
   hourlyLimit: z.number().int().min(1, "Hourly limit must be at least 1"),
+  attachments: z
+    .array(z.object({ filename: z.string().min(1).max(255), contentType: z.string().max(255), content: z.base64() }))
+    .max(MAX_ATTACHMENTS, `You can attach up to ${MAX_ATTACHMENTS} files`)
+    .optional(),
 });
 
 const listSchema = z.object({
@@ -47,4 +52,13 @@ export async function star(req: Request, res: Response) {
 
 export async function senders(_req: Request, res: Response) {
   res.json(await listSenders());
+}
+
+export async function attachment(req: Request, res: Response) {
+  const file = await getAttachmentForUser(req.userId, idSchema.parse(req.params.id));
+  res.set({
+    "Content-Type": file.contentType,
+    "Content-Disposition": `inline; filename="${encodeURIComponent(file.filename)}"`,
+  });
+  res.send(file.content);
 }

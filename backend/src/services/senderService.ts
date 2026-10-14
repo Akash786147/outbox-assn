@@ -11,6 +11,9 @@ export async function ensureSenders() {
   const existing = await db.select().from(senders);
   const missing = config.etherealSenderCount - existing.length;
 
+  // nodemailer caches the test account by default, which would return the same account every time
+  process.env.ETHEREAL_CACHE = "no";
+
   for (let i = 0; i < missing; i++) {
     const account = await nodemailer.createTestAccount();
     await db.insert(senders).values({

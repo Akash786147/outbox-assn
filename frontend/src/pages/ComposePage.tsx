@@ -9,10 +9,12 @@ import { NumberField } from "@/components/compose/NumberField";
 import { RecipientsInput } from "@/components/compose/RecipientsInput";
 import { RichTextEditor } from "@/components/compose/RichTextEditor";
 import { SendLaterPopover } from "@/components/compose/SendLaterPopover";
+import { LocalAttachment } from "@/components/attachments/LocalAttachment";
 import { useClickOutside } from "@/hooks/useClickOutside";
 import { useScheduleEmails, useSenders } from "@/hooks/useEmails";
 import { extractEmails, mergeEmails } from "@/utils/emails";
 import { formatDateTime } from "@/utils/format";
+import { MAX_ATTACHMENTS, MAX_ATTACHMENTS_BYTES, toAttachmentUploads } from "@/utils/files";
 
 export default function ComposePage() {
   const navigate = useNavigate();
@@ -26,10 +28,11 @@ export default function ComposePage() {
   const [delaySeconds, setDelaySeconds] = useState("");
   const [hourlyLimit, setHourlyLimit] = useState("");
   const [sendAt, setSendAt] = useState<Date | null>(null);
-  const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
+  const [attachments, setAttachments] = useState<File[]>([]);
   const [popoverOpen, setPopoverOpen] = useState(false);
 
-  const fileRef = useRef<HTMLInputElement>(null);
+  const leadsRef = useRef<HTMLInputElement>(null);
+  const attachmentsRef = useRef<HTMLInputElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const closePopover = useCallback(() => setPopoverOpen(false), []);
   useClickOutside(popoverRef, closePopover, popoverOpen);
@@ -38,7 +41,7 @@ export default function ComposePage() {
 
   const onBodyChange = useCallback((html: string, isEmpty: boolean) => setBody({ html, isEmpty }), []);
 
-  const onFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
+  const onLeadsUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
@@ -49,9 +52,20 @@ export default function ComposePage() {
       return;
     }
     setRecipients((current) => mergeEmails(current, emails));
-    setUploadedFiles((files) => [...files, file.name]);
     toast.success(`${emails.length} email addresses detected in ${file.name}`);
   };
+
+  const onAttach = (e: ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(e.target.files ?? []);
+    e.target.value = "";
+
+    const next = [...attachments, ...picked];
+    if (next.length > MAX_ATTACHMENTS) return toast.error(`You can attach up to ${MAX_ATTACHMENTS} files`);
+    if (next.reduce((sum, f) => sum + f.size, 0) > MAX_ATTACHMENTS_BYTES) return toast.error("Attachments can be 5 MB in total");
+    setAttachments(next);
+  };
+
+  const removeAttachment = (index: number) => setAttachments((files) => files.filter((_, i) => i !== index));
 
   const validate = () => {
     if (!senderId) return "Pick a sender";
@@ -63,7 +77,7 @@ export default function ComposePage() {
     return null;
   };
 
-  const onSubmit = () => {
+  const onSubmit = async () => {
     const error = validate();
     if (error) return toast.error(error);
 
@@ -76,6 +90,7 @@ export default function ComposePage() {
         startTime: sendAt?.toISOString(),
         delaySeconds: Number(delaySeconds || 0),
         hourlyLimit: Number(hourlyLimit),
+        attachments: await toAttachmentUploads(attachments),
       },
       {
         onSuccess: (res) => {
@@ -95,11 +110,11 @@ export default function ComposePage() {
         </IconButton>
         <h1 className="flex-1 text-3xl">Compose New Email</h1>
 
-        <IconButton label="Upload leads file" onClick={() => fileRef.current?.click()} className="relative text-brand">
+        <IconButton label="Attach files" onClick={() => attachmentsRef.current?.click()} className="relative text-brand">
           <Paperclip className="h-6 w-6" />
-          {uploadedFiles.length > 0 && (
+          {attachments.length > 0 && (
             <span className="absolute right-0.5 bottom-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-surface text-[10px] text-neutral-700">
-              {uploadedFiles.length}
+              {attachments.length}
             </span>
           )}
         </IconButton>
@@ -124,7 +139,8 @@ export default function ComposePage() {
         </div>
       </header>
 
-      <input ref={fileRef} type="file" accept=".csv,.txt,text/csv,text/plain" hidden onChange={onFileUpload} />
+      <input ref={leadsRef} type="file" accept=".csv,.txt,text/csv,text/plain" hidden onChange={onLeadsUpload} />
+      <input ref={attachmentsRef} type="file" multiple hidden onChange={onAttach} />
 
       <div className="mx-auto flex max-w-6xl flex-col gap-5 px-6 pt-4 lg:pl-56 lg:pr-24">
         <div className="flex items-center gap-6">
@@ -150,7 +166,7 @@ export default function ComposePage() {
         <div className="flex items-center gap-6">
           <span className="w-16 text-[15px]">To</span>
           <div className="flex-1">
-            <RecipientsInput value={recipients} onChange={setRecipients} onUploadClick={() => fileRef.current?.click()} />
+            <RecipientsInput value={recipients} onChange={setRecipients} onUploadClick={() => leadsRef.current?.click()} />
           </div>
         </div>
         {recipients.length > 0 && (
@@ -181,6 +197,14 @@ export default function ComposePage() {
         </div>
 
         <RichTextEditor onChange={onBodyChange} />
+
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-4">
+            {attachments.map((file, i) => (
+              <LocalAttachment key={`${file.name}-${i}`} file={file} onRemove={() => removeAttachment(i)} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,4 +1,8 @@
-import { boolean, index, integer, pgEnum, pgTable, serial, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { boolean, customType, index, integer, pgEnum, pgTable, serial, text, timestamp, uuid } from "drizzle-orm/pg-core";
+
+const tsvector = customType<{ data: string }>({ dataType: () => "tsvector" });
+const bytea = customType<{ data: Buffer }>({ dataType: () => "bytea" });
 
 export const emailStatus = pgEnum("email_status", ["scheduled", "sending", "sent", "failed"]);
 
@@ -45,8 +49,32 @@ export const emails = pgTable(
     error: text("error"),
     starred: boolean("starred").default(false).notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
+    // kept up to date by Postgres itself, subject ranks higher than recipient and body
+    searchVector: tsvector("search_vector").generatedAlwaysAs(
+      sql`setweight(to_tsvector('english', subject), 'A') || setweight(to_tsvector('simple', to_email), 'B') || setweight(to_tsvector('english', regexp_replace(body, '<[^>]*>', ' ', 'g')), 'C')`,
+    ),
   },
-  (t) => [index("emails_user_status_idx").on(t.userId, t.status), index("emails_batch_idx").on(t.batchId)],
+  (t) => [
+    index("emails_user_status_idx").on(t.userId, t.status),
+    index("emails_batch_idx").on(t.batchId),
+    index("emails_search_idx").using("gin", t.searchVector),
+    index("emails_to_email_trgm_idx").using("gin", t.toEmail.op("gin_trgm_ops")),
+  ],
+);
+
+// files are shared by every email in a batch and stored in the DB so they survive restarts
+export const attachments = pgTable(
+  "attachments",
+  {
+    id: serial("id").primaryKey(),
+    batchId: uuid("batch_id").notNull(),
+    filename: text("filename").notNull(),
+    contentType: text("content_type").notNull(),
+    size: integer("size").notNull(),
+    content: bytea("content").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [index("attachments_batch_idx").on(t.batchId)],
 );
 
 export type User = typeof users.$inferSelect;

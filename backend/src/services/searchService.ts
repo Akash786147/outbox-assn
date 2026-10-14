@@ -1,5 +1,18 @@
+import { ilike, or, sql } from "drizzle-orm";
 import { elastic, EMAIL_INDEX } from "../lib/elastic";
-import { Email } from "../db/schema";
+import { Email, emails } from "../db/schema";
+
+// Postgres full-text search on the indexed search_vector column (GIN),
+// every word is a prefix match so "foll" finds "follow up".
+// The recipient also gets a trigram (ILIKE) match so "john" finds "john@acme.com".
+export function postgresSearchFilter(query: string) {
+  const words = query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  const emailMatch = ilike(emails.toEmail, `%${query.replace(/[%_\\]/g, "\\$&")}%`);
+  if (words.length === 0) return emailMatch;
+
+  const tsQuery = words.map((w) => `${w}:*`).join(" & ");
+  return or(sql`${emails.searchVector} @@ to_tsquery('english', ${tsQuery})`, emailMatch)!;
+}
 
 const stripHtml = (html: string) => html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 

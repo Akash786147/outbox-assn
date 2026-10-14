@@ -1,0 +1,3 @@
+ALTER TABLE "emails" ADD COLUMN "search_vector" "tsvector" GENERATED ALWAYS AS (setweight(to_tsvector('english', subject), 'A') || setweight(to_tsvector('simple', to_email), 'B') || setweight(to_tsvector('english', regexp_replace(body, '<[^>]*>', ' ', 'g')), 'C')) STORED;--> statement-breakpoint
+CREATE INDEX "emails_search_idx" ON "emails" USING gin ("search_vector");--> statement-breakpoint
+CREATE INDEX "emails_to_email_trgm_idx" ON "emails" USING gin ("to_email" gin_trgm_ops);

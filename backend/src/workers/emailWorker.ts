@@ -7,6 +7,7 @@ import { config } from "../config";
 import { bullConnection } from "../lib/redis";
 import { EMAIL_QUEUE, EmailJobData } from "../queue/emailQueue";
 import { getSender, getTransporter } from "../services/senderService";
+import { getBatchAttachments } from "../services/attachmentService";
 import { nextAvailableTime, reserveSendSlot, shouldNotify } from "../services/rateLimiter";
 import { indexEmails } from "../services/searchService";
 import { notifyUser } from "../services/slackService";
@@ -58,11 +59,13 @@ async function processEmail(job: Job<EmailJobData>, token?: string) {
   await updateEmail(email.id, { status: "sending" });
 
   try {
+    const files = await getBatchAttachments(email.batchId);
     const info = await getTransporter(sender).sendMail({
       from: `"${sender.name}" <${sender.email}>`,
       to: email.toEmail,
       subject: email.subject,
       html: email.body,
+      attachments: files,
       messageId: `<email-${email.id}@email-scheduler.local>`,
     });
 

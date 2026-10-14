@@ -1,9 +1,10 @@
 import { randomUUID } from "crypto";
-import { and, asc, count, desc, eq, ilike, inArray, or } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db";
 import { emails, senders } from "../db/schema";
 import { enqueueEmails } from "../queue/emailQueue";
-import { indexEmails, searchEmailIds } from "./searchService";
+import { indexEmails, postgresSearchFilter, searchEmailIds } from "./searchService";
+import { AttachmentInput, decodeAttachments, listAttachmentMeta, saveAttachments } from "./attachmentService";
 import { HttpError } from "../utils/httpError";
 
 export type EmailTab = "scheduled" | "sent";
@@ -24,6 +25,7 @@ export interface ScheduleInput {
   startTime?: string;
   delaySeconds: number;
   hourlyLimit: number;
+  attachments?: AttachmentInput[];
 }
 
 export async function scheduleEmails(userId: number, input: ScheduleInput) {
@@ -33,6 +35,7 @@ export async function scheduleEmails(userId: number, input: ScheduleInput) {
   const recipients = [...new Set(input.recipients.map((r) => r.trim().toLowerCase()))];
   const start = Math.max(Date.now(), input.startTime ? new Date(input.startTime).getTime() : 0);
   const batchId = randomUUID();
+  const files = decodeAttachments(input.attachments ?? []);
 
   const rows = recipients.map((toEmail, i) => ({
     userId,
@@ -45,11 +48,15 @@ export async function scheduleEmails(userId: number, input: ScheduleInput) {
     scheduledAt: new Date(start + i * input.delaySeconds * 1000),
   }));
 
-  // the DB is the source of truth, so rows are saved before anything goes to the queue
-  const created = [];
-  for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
-    created.push(...(await db.insert(emails).values(rows.slice(i, i + INSERT_CHUNK)).returning()));
-  }
+  // the DB is the source of truth, so rows are saved (all or nothing) before anything goes to the queue
+  const created = await db.transaction(async (tx) => {
+    await saveAttachments(tx, batchId, files);
+    const inserted = [];
+    for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
+      inserted.push(...(await tx.insert(emails).values(rows.slice(i, i + INSERT_CHUNK)).returning()));
+    }
+    return inserted;
+  });
 
   await enqueueEmails(created);
   await indexEmails(created);
@@ -90,13 +97,13 @@ export async function listEmails(userId: number, { tab, status, q, page, limit }
   const filters = [eq(emails.userId, userId), inArray(emails.status, statuses)];
 
   if (q) {
+    // Elasticsearch is optional, Postgres full-text search is the default
     const ids = await searchEmailIds(userId, q, statuses);
     if (ids) {
       if (ids.length === 0) return { items: [], nextPage: null };
       filters.push(inArray(emails.id, ids));
     } else {
-      const pattern = `%${q}%`;
-      filters.push(or(ilike(emails.subject, pattern), ilike(emails.toEmail, pattern))!);
+      filters.push(postgresSearchFilter(q));
     }
   }
 
@@ -115,9 +122,9 @@ export async function listEmails(userId: number, { tab, status, q, page, limit }
   return { items: items.slice(0, limit), nextPage: hasMore ? page + 1 : null };
 }
 
-export async function getEmail(userId: number, id: number) {
+async function findEmail(userId: number, id: number) {
   const [email] = await db
-    .select(emailColumns)
+    .select({ ...emailColumns, batchId: emails.batchId })
     .from(emails)
     .innerJoin(senders, eq(emails.senderId, senders.id))
     .where(and(eq(emails.id, id), eq(emails.userId, userId)));
@@ -126,8 +133,13 @@ export async function getEmail(userId: number, id: number) {
   return email;
 }
 
+export async function getEmail(userId: number, id: number) {
+  const { batchId, ...email } = await findEmail(userId, id);
+  return { ...email, attachments: await listAttachmentMeta(batchId) };
+}
+
 export async function toggleStar(userId: number, id: number) {
-  const email = await getEmail(userId, id);
+  const email = await findEmail(userId, id);
   await db.update(emails).set({ starred: !email.starred }).where(eq(emails.id, id));
   return { starred: !email.starred };
 }

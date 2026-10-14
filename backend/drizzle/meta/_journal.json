@@ -8,6 +8,27 @@
       "when": 1791969267516,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1791973367585,
+      "tag": "0001_enable_pg_trgm",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791973369151,
+      "tag": "0002_email_search_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791974987797,
+      "tag": "0003_attachments",
+      "breakpoints": true
     }
   ]
 }
